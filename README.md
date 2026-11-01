@@ -1,10 +1,10 @@
-# ATRI指令大全 · astrbot_plugin_atri_command_help
-
 <img src="https://raw.githubusercontent.com/HoshimiSenya/astrbot_plugin_atri_command_help/main/logo.png" alt="插件图标" width="120">
 
-<a href="https://github.com/HoshimiSenya/astrbot_plugin_atri_command_help/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
-<img src="https://img.shields.io/badge/AstrBot-%3E%3D4.16-blue" alt="AstrBot >= 4.16">
-<img src="https://img.shields.io/badge/version-1.2.0-2f7fd1" alt="version 1.2.0">
+# ATRI指令大全 · astrbot_plugin_atri_command_help
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://github.com/HoshimiSenya/astrbot_plugin_atri_command_help/blob/main/LICENSE)
+![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.16-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-2f7fd1)
 
 给 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 加一个**统一的指令查询入口**：只注册一个指令，发送后自动抓取当前所有已加载插件的指令，在**本机渲染成一张卡片图**发出来。不依赖远端 T2I 服务，离线也能出图。
 
@@ -39,7 +39,7 @@
 
 本项目不是上游的官方分支，而是独立维护的修改版。核心采集与渲染逻辑来自上游，主要差异如下：
 
-| 项目 | 上游 `astrbot_plugin_command_help` | 本项目 `astrbot_plugin_atri_command_help` |
+| 项目 | 上游 | 本项目 |
 | --- | --- | --- |
 | 插件标识 | `astrbot_plugin_command_help` | `astrbot_plugin_atri_command_help` |
 | 显示名 | 指令大全 | ATRI指令大全 |
