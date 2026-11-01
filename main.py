@@ -1,4 +1,8 @@
-"""AstrBot 指令大全插件.
+"""AstrBot ATRI 指令大全插件（astrbot_plugin_atri_command_help）.
+
+本项目基于 AcceleratorYue 的 astrbot_plugin_command_help 修改而来，
+沿用上游的指令采集、Pillow 本地渲染与缓存机制，并加入 ATRI 主题底图、
+按身份过滤管理指令、隐藏规则等改动。
 
 只提供一个指令，用于把「当前已加载的所有插件」的指令汇总成一张图片发出去。
 
@@ -11,13 +15,16 @@
 3. 出图使用 Pillow 在本机渲染，不依赖远端 T2I 服务，所以离线也能用。
 4. 图片写到 AstrBot 的临时目录，并自动清理旧文件，不会越攒越多。
 
-作者：QQbot 自用插件
-版本：1.0.0
+上游：https://github.com/AcceleratorYue/astrbot_plugin_command_help
+版本：1.2.0
+许可证：MIT
 """
 
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import hashlib
 import os
 import re
 import time
@@ -40,21 +47,23 @@ except Exception:  # pragma: no cover - 仅在 Pillow 缺失时触发
     PIL_AVAILABLE = False
 
 
-PLUGIN_VERSION = "1.0.0"
-LOG_PREFIX = "[指令大全]"
+PLUGIN_VERSION = "1.2.0"
+LOG_PREFIX = "[ATRI指令大全]"
+
+# 临时图片文件名前缀。与上游的 command_help_ 区分开，避免两个插件互相清理旧图。
+TEMP_FILE_PREFIX = "atri_command_help"
 
 # 指令名 / 别名。只注册这一个指令；别名让「/帮助」这种直觉用法也能用。
 COMMAND_NAMES = ("指令大全",)
 COMMAND_ALIASES = ("帮助", "指令帮助", "指令列表")
 
 DEFAULT_OPTIONS: dict[str, Any] = {
-    "title": "指令总览",
+    "title": "ATRI指令大全",
     "include_builtin": True,
     "include_admin_only": True,
     "show_aliases": True,
     "columns": 2,
-    "cache_seconds": 30,
-    "footer_note": "",
+    "exclude_rules": [],
 }
 
 # 图片缓存文件保留时长（秒）。超时的旧图会被自动删掉。
@@ -94,8 +103,6 @@ class PluginSection:
     key: str
     display_name: str
     description: str = ""
-    version: str = ""
-    author: str = ""
     reserved: bool = False
     entries: list[CommandEntry] = field(default_factory=list)
 
@@ -119,15 +126,59 @@ class PluginSection:
 class RenderOptions:
     """一次渲染所需的全部选项。"""
 
-    title: str = "指令总览"
+    title: str = "ATRI指令大全"
     columns: int = 2
     show_aliases: bool = True
     command_prefix: str = "/"
-    footer_note: str = ""
-    generated_at: str = ""
     plugin_count: int = 0
     command_count: int = 0
-    astrbot_version: str = ""
+
+
+def render_fingerprint(
+    sections: list[PluginSection], options: RenderOptions
+) -> str:
+    """计算当前要渲染内容的指纹，用于复用内容相同的上一张图。
+
+    指纹包含标题、栏数、别名开关、唤醒前缀、底图，以及每个插件卡片和
+    每条指令的最终展示信息；任一内容变化都会生成新的指纹。
+    """
+
+    def entry_key(entry: CommandEntry) -> tuple:
+        return (
+            entry.name,
+            tuple(entry.aliases),
+            entry.description,
+            entry.params,
+            entry.permission,
+            entry.kind,
+            tuple(entry_key(child) for child in entry.children),
+        )
+
+    background = _background_source()
+    background_key = (
+        (str(background), background.stat().st_mtime_ns)
+        if background is not None
+        else None
+    )
+
+    payload = (
+        options.title,
+        int(options.columns),
+        bool(options.show_aliases),
+        options.command_prefix,
+        background_key,
+        tuple(
+            (
+                section.key,
+                section.display_name,
+                section.description,
+                section.reserved,
+                tuple(entry_key(entry) for entry in section.entries),
+            )
+            for section in sections
+        ),
+    )
+    return hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +270,7 @@ def _plugin_dir_candidates(root: str) -> list[Path]:
 def _fallback_plugin_meta(root: str) -> dict[str, str]:
     """兜底：直接读插件目录里的 metadata.yaml（测试环境也能拿到展示名）。"""
 
-    result = {"display_name": "", "name": "", "desc": "", "version": "", "author": ""}
+    result = {"display_name": "", "name": "", "desc": ""}
     if not root:
         return result
 
@@ -238,8 +289,6 @@ def _fallback_plugin_meta(root: str) -> dict[str, str]:
             result["display_name"] = str(raw.get("display_name") or "")
             result["name"] = str(raw.get("name") or "")
             result["desc"] = str(raw.get("short_desc") or raw.get("desc") or "")
-            result["version"] = str(raw.get("version") or "")
-            result["author"] = str(raw.get("author") or "")
             return result
         except Exception:
             continue
@@ -265,10 +314,10 @@ def _pretty_name(name: str) -> str:
 # 少数内置插件没有中文展示名/简介，这里补一下，避免图里出现英文目录名。
 _DISPLAY_OVERRIDES: dict[str, tuple[str, str]] = {
     "builtin_commands": (
-        "内置指令",
+        "基础指令",
         "AstrBot 自带的基础指令，例如 /reset、/new、/stats",
     ),
-    "astrbot": ("AstrBot 内置", "AstrBot 框架自带的内部插件"),
+    "astrbot": ("AstrBot 框架", "AstrBot 框架自带的内部插件"),
 }
 
 
@@ -305,8 +354,6 @@ def _section_for(
         override_name, override_desc = _DISPLAY_OVERRIDES[root]
         display_name = override_name
         desc = override_desc or desc
-    version = (getattr(meta, "version", None) if meta else None) or yaml_meta["version"]
-    author = (getattr(meta, "author", None) if meta else None) or yaml_meta["author"]
     reserved = bool(getattr(meta, "reserved", False)) if meta else root in (
         "builtin_commands",
         "astrbot",
@@ -316,8 +363,6 @@ def _section_for(
         key=root,
         display_name=str(display_name),
         description=_clean_description(str(desc)),
-        version=str(version or ""),
-        author=str(author or ""),
         reserved=reserved,
     )
     memo[root] = section
@@ -717,7 +762,7 @@ def _finalize_sections(memo: dict[str, PluginSection]) -> list[PluginSection]:
 
 # AstrBot 内置指令的 docstring 是英文的，这里补一份中文说明，免得图里中英混杂。
 _BUILTIN_COMMAND_DESCRIPTIONS = {
-    "help": "查看 AstrBot 内置帮助",
+    "help": "查看 AstrBot 自带帮助",
     "sid": "查看当前会话 ID 等信息",
     "name": "设置当前会话的显示名",
     "reset": "清空当前会话的上下文",
@@ -740,6 +785,10 @@ def _localize_builtin_descriptions(entries: list[CommandEntry]) -> None:
             _localize_builtin_descriptions(entry.children)
 
 
+# 需要管理权限的指令类型。普通用户请求图片时，这些指令不会出现在图里。
+_ADMIN_PERMISSIONS = {"admin", "group_admin", "shared_group_admin"}
+
+
 def filter_sections(
     sections: list[PluginSection],
     *,
@@ -751,17 +800,14 @@ def filter_sections(
     def prune(entries: list[CommandEntry]) -> list[CommandEntry]:
         kept: list[CommandEntry] = []
         for entry in entries:
+            if not include_admin_only and entry.permission in _ADMIN_PERMISSIONS:
+                continue
             if entry.is_group:
                 entry.children = prune(entry.children)
                 if entry.children:
                     kept.append(entry)
                 continue
-            if include_admin_only or entry.permission not in (
-                "admin",
-                "group_admin",
-                "shared_group_admin",
-            ):
-                kept.append(entry)
+            kept.append(entry)
         return kept
 
     result: list[PluginSection] = []
@@ -774,8 +820,207 @@ def filter_sections(
     return result
 
 
+# 本插件自己也注册了一条指令，采集时自然会把自己也收进来。
+# 但「指令大全」没必要出现在自己生成的指令大全里，所以固定摘掉；
+# 上游同名插件（若与本插件共存）也一并摘掉，免得又冒出一张同款卡片。
+_SELF_DIR_NAMES = {
+    "astrbot_plugin_atri_command_help",
+    "astrbot_plugin_command_help",
+}
+_SELF_DISPLAY_NAMES = {"atri指令大全", "指令大全"}
+
+
+def _is_self_section(section: PluginSection) -> bool:
+    """判断这张卡片是不是「指令大全」本身。"""
+
+    if section.key.strip().lower() in _SELF_DIR_NAMES:
+        return True
+    return section.display_name.strip().lower() in _SELF_DISPLAY_NAMES
+
+
+def drop_self_sections(sections: list[PluginSection]) -> list[PluginSection]:
+    """摘掉「指令大全」自己的卡片，只保留其他插件的指令。"""
+
+    return [section for section in sections if not _is_self_section(section)]
+
+
+# ---------------------------------------------------------------------------
+# 隐藏规则：让管理员在设置页里挑掉不想展示的插件 / 指令
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ExcludeRule:
+    """一条隐藏规则：某个插件下要隐藏的指令。"""
+
+    plugin: str = ""
+    commands: list[str] = field(default_factory=list)
+
+    @property
+    def whole_plugin(self) -> bool:
+        """没有填写指令（或填了 *）表示隐藏整个插件。"""
+
+        return not self.commands or any(
+            str(item).strip() in ("*", "＊") for item in self.commands
+        )
+
+
+_SPLIT_RE = re.compile(r"[,，、;；\r\n]+")
+_LINE_SPLIT_RE = re.compile(r"[:：|｜]")
+
+
+def _split_command_text(text: Any) -> list[str]:
+    """把「指令A, 指令B」这类文本拆成列表（兼容 list）。
+
+    只按逗号 / 顿号 / 分号 / 换行拆分，不按空格拆，
+    这样「设置 子项」这种带空格的指令全名也能正确填进来。
+    """
+
+    if text is None:
+        return []
+    if isinstance(text, (list, tuple, set)):
+        parts: list[str] = []
+        for item in text:
+            parts.extend(_split_command_text(item))
+        return parts
+    return [part.strip() for part in _SPLIT_RE.split(str(text)) if part.strip()]
+
+
+def parse_exclude_rules(raw: Any) -> list[ExcludeRule]:
+    """解析设置页里的隐藏规则。
+
+    兼容三种写法：
+    1. 设置页的 template_list：``[{"plugin": "...", "commands": "..."}]``；
+    2. 字符串列表：``["插件名: 指令A, 指令B"]``；
+    3. 多行文本：每行一条 ``插件名: 指令A, 指令B``，指令留空表示整个插件。
+    """
+
+    rules: list[ExcludeRule] = []
+    if raw is None:
+        return rules
+
+    if isinstance(raw, str):
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = _LINE_SPLIT_RE.split(line, maxsplit=1)
+            plugin = parts[0].strip()
+            commands = _split_command_text(parts[1]) if len(parts) > 1 else []
+            if plugin:
+                rules.append(ExcludeRule(plugin=plugin, commands=commands))
+        return rules
+
+    if isinstance(raw, dict):
+        raw = [raw]
+
+    if isinstance(raw, (list, tuple, set)):
+        for item in raw:
+            if isinstance(item, str):
+                rules.extend(parse_exclude_rules(item))
+                continue
+            if not isinstance(item, dict):
+                continue
+            plugin = str(
+                item.get("plugin")
+                or item.get("plugin_name")
+                or item.get("name")
+                or ""
+            ).strip()
+            command_value = item.get("commands")
+            if command_value is None:
+                command_value = item.get("command", "")
+            commands = _split_command_text(command_value)
+            if plugin or commands:
+                rules.append(ExcludeRule(plugin=plugin, commands=commands))
+
+    return rules
+
+
+def _norm_token(value: Any) -> str:
+    """统一插件名 / 指令名的比较形式（忽略大小写、前缀、空格与分隔符）。"""
+
+    text = str(value or "").strip().lower()
+    text = text.replace("\\", "/")
+    for prefix in ("astrbot_plugin_", "astrbot_"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+            break
+    text = text.lstrip("/／!！")
+    return re.sub(r"[\s_\-]+", "", text)
+
+
+def _plugin_matches(rule: ExcludeRule, section: PluginSection) -> bool:
+    pattern = _norm_token(rule.plugin)
+    if pattern in ("", "*"):
+        return True
+    candidates = {_norm_token(section.key), _norm_token(section.display_name)}
+    return any(
+        candidate and fnmatch.fnmatchcase(candidate, pattern)
+        for candidate in candidates
+    )
+
+
+def _entry_matches(rule: ExcludeRule, entry: CommandEntry) -> bool:
+    if rule.whole_plugin:
+        return True
+
+    patterns = [pattern for pattern in (_norm_token(c) for c in rule.commands) if pattern]
+    if not patterns:
+        return True
+
+    candidates = [_norm_token(entry.name)]
+    candidates.extend(_norm_token(alias) for alias in entry.aliases)
+    leaf = entry.name.split()[-1] if entry.name.split() else entry.name
+    candidates.append(_norm_token(leaf))
+
+    for pattern in patterns:
+        if pattern == "*":
+            return True
+        if any(
+            candidate and fnmatch.fnmatchcase(candidate, pattern)
+            for candidate in candidates
+        ):
+            return True
+    return False
+
+
+def apply_exclude_rules(
+    sections: list[PluginSection], rules: list[ExcludeRule]
+) -> list[PluginSection]:
+    """按隐藏规则裁剪插件与指令；指令组被掏空时一并去掉。"""
+
+    if not rules:
+        return sections
+
+    def prune(section: PluginSection, entries: list[CommandEntry]) -> list[CommandEntry]:
+        kept: list[CommandEntry] = []
+        for entry in entries:
+            if any(
+                _plugin_matches(rule, section) and _entry_matches(rule, entry)
+                for rule in rules
+            ):
+                continue
+            if entry.is_group:
+                entry.children = prune(section, entry.children)
+                if not entry.children:
+                    continue
+            kept.append(entry)
+        return kept
+
+    result: list[PluginSection] = []
+    for section in sections:
+        section.entries = prune(section, section.entries)
+        if section.entries:
+            result.append(section)
+    return result
+
+
 async def collect_command_sections(
-    *, include_builtin: bool = True, include_admin_only: bool = True
+    *,
+    include_builtin: bool = True,
+    include_admin_only: bool = True,
+    exclude_rules: list[ExcludeRule] | None = None,
 ) -> list[PluginSection]:
     """采集全部插件指令；官方接口失败时自动回退。"""
 
@@ -792,6 +1037,9 @@ async def collect_command_sections(
         include_builtin=include_builtin,
         include_admin_only=include_admin_only,
     )
+    sections = apply_exclude_rules(sections, exclude_rules or [])
+    # 「指令大全」自己不该出现在自己生成的图里。
+    sections = drop_self_sections(sections)
     total = sum(section.command_count for section in sections)
     logger.debug(
         f"{LOG_PREFIX} 采集完成（{source}）：{len(sections)} 个插件，{total} 条指令"
@@ -802,7 +1050,7 @@ async def collect_command_sections(
 def sections_to_text(sections: list[PluginSection], prefix: str = "/") -> str:
     """Pillow 不可用时的纯文本兜底输出。"""
 
-    lines: list[str] = ["指令总览（图片渲染不可用，已降级为文本）", ""]
+    lines: list[str] = ["ATRI指令大全（图片渲染不可用，已降级为文本）", ""]
     for section in sections:
         lines.append(f"【{section.display_name}】")
         for entry in section.entries:
@@ -833,14 +1081,18 @@ CARD_RADIUS = 16
 FOOTER_H = 50
 
 BG = "#edf1f7"
-CARD_BG = "#ffffff"
+# 模块背景不透明度：204 / 255 ≈ 80%，即 20% 透明。
+CARD_ALPHA = 204
 INK = "#1f2937"
 INK_SOFT = "#3f4a58"
 MUTED = "#5b6675"
 MUTED_LIGHT = "#8a94a3"
 LINE = "#e2e8f0"
-HEADER_TOP = "#1d5aa8"
-HEADER_BOTTOM = "#319ed8"
+
+# 底图：与 main.py 放在同一目录；找不到时退回纯色背景。
+BACKGROUND_IMAGE_NAME = "ATRI.jpeg"
+# 竖向裁剪锚点（0 = 顶部，1 = 底部）。略高于中心，避免短图把人物头部裁掉。
+BACKGROUND_ANCHOR_Y = 0.30
 
 ACCENTS = [
     "#2f7fd1",
@@ -861,23 +1113,159 @@ PERMISSION_BADGES = {
     "shared_group_admin": ("群管", "#ede9fe", "#c4b5fd", "#6d28d9"),
 }
 
-_BOLD_FONT_CANDIDATES = [
-    r"C:\Windows\Fonts\msyhbd.ttc",
-    r"C:\Windows\Fonts\msyhbd.ttf",
-    r"C:\Windows\Fonts\simhei.ttf",
-    r"C:\Windows\Fonts\msyh.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+# 常见 Linux 发行版自带的中文字体（黑体 / 无衬线优先）。
+# 不同发行版的安装路径不完全一样，除了这里列出的固定路径，还会递归扫描字体目录兜底。
+_LINUX_CJK_FONT_CANDIDATES = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/opentype/noto/NotoSansSC-Regular.otf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf",
 ]
 
-_REGULAR_FONT_CANDIDATES = [
+_LINUX_CJK_BOLD_FONT_CANDIDATES = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Bold.otf",
+    "/usr/share/fonts/opentype/noto/NotoSansSC-Bold.otf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Bold.otf",
+] + _LINUX_CJK_FONT_CANDIDATES
+
+# Windows / macOS 作为开发机兜底，Linux 上这些路径不存在，会自动跳过。
+_WINDOWS_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\simhei.ttf",
     r"C:\Windows\Fonts\msyh.ttc",
     r"C:\Windows\Fonts\msyh.ttf",
     r"C:\Windows\Fonts\simsun.ttc",
-    r"C:\Windows\Fonts\simhei.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
 ]
+
+_WINDOWS_BOLD_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\msyhbd.ttf",
+] + _WINDOWS_FONT_CANDIDATES
+
+_MAC_FONT_CANDIDATES = [
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+]
+
+# 递归扫描字体目录时，只挑名字里带这些关键字的字体，避免把整个字体库都加载进来。
+_CJK_FONT_KEYWORDS = (
+    "notosanscjk",
+    "notosanssc",
+    "notoserifcjk",
+    "sourcehansans",
+    "sourcehanserif",
+    "wqy",
+    "droidsansfallback",
+    "uming",
+    "ukai",
+    "simhei",
+    "msyh",
+)
+
+_LINUX_FONT_DIRS = (
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    "~/.local/share/fonts",
+    "~/.fonts",
+)
+
+_discovered_font_cache: list[str] | None = None
+
+
+def _discover_linux_cjk_fonts() -> list[str]:
+    """递归扫描常见字体目录，找出可用的中文字体文件（结果缓存）。"""
+
+    global _discovered_font_cache
+    if _discovered_font_cache is not None:
+        return _discovered_font_cache
+
+    found: list[str] = []
+    for raw_dir in _LINUX_FONT_DIRS:
+        base = Path(raw_dir).expanduser()
+        if not base.is_dir():
+            continue
+        try:
+            for root, _dirs, files in os.walk(base):
+                for filename in files:
+                    if os.path.splitext(filename)[1].lower() not in {
+                        ".ttf",
+                        ".ttc",
+                        ".otf",
+                    }:
+                        continue
+                    if any(
+                        keyword in filename.lower()
+                        for keyword in _CJK_FONT_KEYWORDS
+                    ):
+                        found.append(os.path.join(root, filename))
+        except OSError:
+            continue
+
+    # 去重并保持稳定顺序。
+    seen: set[str] = set()
+    unique: list[str] = []
+    for path in found:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    _discovered_font_cache = unique
+    return unique
+
+
+def _fontconfig_cjk_fonts() -> list[str]:
+    """用 fontconfig 兜底查找已安装的中文字体（Linux 常见）。"""
+
+    import shutil
+    import subprocess
+
+    if shutil.which("fc-list") is None:
+        return []
+    try:
+        result = subprocess.run(
+            ["fc-list", ":lang=zh-cn", "-f", "%{file}\n"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    paths: list[str] = []
+    for line in result.stdout.splitlines():
+        path = line.strip()
+        if (
+            path
+            and os.path.isfile(path)
+            and os.path.splitext(path)[1].lower() in {".ttf", ".ttc", ".otf"}
+        ):
+            paths.append(path)
+    return paths
+
+
+def _order_discovered_fonts(fonts: list[str], bold: bool) -> list[str]:
+    """加粗请求优先选 Bold 文件，常规请求优先选 Regular 文件。"""
+
+    bold_markers = ("bold", "bd", "heavy", "black")
+    preferred: list[str] = []
+    others: list[str] = []
+    for path in fonts:
+        name = Path(path).name.lower()
+        is_bold = any(marker in name for marker in bold_markers)
+        (preferred if is_bold == bold else others).append(path)
+    return preferred + others
 
 
 def _sibling_font_paths() -> list[str]:
@@ -913,14 +1301,63 @@ _font_path_cache: dict[bool, str] = {}
 def _find_font_path(bold: bool) -> str:
     if bold in _font_path_cache:
         return _font_path_cache[bold]
-    candidates = list(_BOLD_FONT_CANDIDATES if bold else _REGULAR_FONT_CANDIDATES)
-    candidates += _sibling_font_paths()
-    for path in candidates:
+
+    # 1. Linux 常见固定路径（Noto / 思源黑体 / 文泉驿 / Droid Fallback）。
+    linux_candidates = (
+        _LINUX_CJK_BOLD_FONT_CANDIDATES if bold else _LINUX_CJK_FONT_CANDIDATES
+    )
+    for path in linux_candidates:
         if path and os.path.isfile(path):
             _font_path_cache[bold] = path
             return path
+
+    # 2. 发行版路径不同，递归扫描字体目录。
+    for path in _order_discovered_fonts(_discover_linux_cjk_fonts(), bold):
+        if os.path.isfile(path):
+            _font_path_cache[bold] = path
+            return path
+
+    # 2.1 仍找不到时，交给 fontconfig 查系统里已安装的中文字体。
+    for path in _order_discovered_fonts(_fontconfig_cjk_fonts(), bold):
+        if os.path.isfile(path):
+            _font_path_cache[bold] = path
+            return path
+
+    # 3. Windows / macOS 开发机兜底，以及兄弟插件自带字体。
+    other_candidates = (
+        _WINDOWS_BOLD_FONT_CANDIDATES if bold else _WINDOWS_FONT_CANDIDATES
+    )
+    for path in [*other_candidates, *_MAC_FONT_CANDIDATES, *_sibling_font_paths()]:
+        if path and os.path.isfile(path):
+            _font_path_cache[bold] = path
+            return path
+
     # 都不存在时，让调用方看到明确错误。
-    raise RuntimeError("未找到可用的中文字体（msyh.ttc / simhei.ttf 等）")
+    raise RuntimeError(
+        "未找到可用的中文字体，请安装 fonts-noto-cjk（Noto Sans CJK）"
+        "或 fonts-wqy-microhei（文泉驿微米黑）后重试"
+    )
+
+
+def _load_truetype(path: str, size: int):
+    """加载字体；对 TTC 字体集合优先选简体中文（SC）字面。"""
+
+    if path.lower().endswith(".ttc"):
+        for index in range(10):
+            try:
+                loaded = ImageFont.truetype(path, size=size, index=index)
+            except OSError:
+                break
+            try:
+                family, _style = loaded.getname()
+            except Exception:
+                family = ""
+            if "sc" in family.lower() or "simplified" in family.lower():
+                return loaded
+    try:
+        return ImageFont.truetype(path, size=size, index=0)
+    except OSError:
+        return ImageFont.truetype(path, size=size)
 
 
 def _font(size: int, bold: bool = False):
@@ -930,10 +1367,7 @@ def _font(size: int, bold: bool = False):
     if not PIL_AVAILABLE:  # pragma: no cover
         raise RuntimeError("Pillow 未安装")
     path = _find_font_path(bold)
-    try:
-        loaded = ImageFont.truetype(path, size=size, index=0)
-    except OSError:
-        loaded = ImageFont.truetype(path, size=size)
+    loaded = _load_truetype(path, size)
     _font_cache[key] = loaded
     return loaded
 
@@ -1034,7 +1468,6 @@ class _FontSet:
         self.subtitle = _font(23)
         self.meta = _font(19)
         self.card_title = _font(30, bold=True)
-        self.badge = _font(26, bold=True)
         self.group = _font(24, bold=True)
         self.group_small = _font(21, bold=True)
         self.cmd = _font(23, bold=True)
@@ -1043,7 +1476,6 @@ class _FontSet:
         self.desc_small = _font(19)
         self.alias = _font(17)
         self.tiny = _font(16)
-        self.footer = _font(19)
 
 
 def _draw_permission_badge(
@@ -1230,39 +1662,22 @@ def _build_section_ops(
     opts: RenderOptions,
     fonts: _FontSet,
 ) -> None:
-    """生成一张插件卡片的全部绘制指令。"""
+    """生成一张插件卡片的全部绘制指令。
 
-    y = CARD_PAD + 14
+    卡片保留插件名称大标题与简介；不显示徽标、版本、作者和「内置」标记。
+    """
 
-    # 徽标
-    badge_size = 48
-    canvas.pill(CARD_PAD, y, badge_size, badge_size, 12, accent)
-    abbr = (section.display_name or section.key or "?")[:2]
+    y = CARD_PAD + 4
+
+    # 插件名称
     canvas.text(
-        CARD_PAD + badge_size // 2,
-        y + badge_size // 2 - 1,
-        abbr,
-        fonts.badge,
-        "#ffffff",
-        anchor="mm",
+        CARD_PAD,
+        y,
+        _ellipsize(section.display_name, fonts.card_title, canvas.width - CARD_PAD * 2),
+        fonts.card_title,
+        INK,
     )
-
-    # 标题 & 版本
-    title_x = CARD_PAD + badge_size + 14
-    canvas.text(title_x, y + 3, section.display_name, fonts.card_title, INK)
-    meta_y = y + 34
-    meta_parts: list[str] = []
-    if section.version:
-        meta_parts.append("v" + section.version.lstrip("vV"))
-    if section.author:
-        meta_parts.append(section.author)
-    if section.reserved:
-        meta_parts.append("内置")
-    if meta_parts:
-        meta_text = _ellipsize(" · ".join(meta_parts), fonts.meta, canvas.width - title_x - CARD_PAD)
-        canvas.text(title_x + 2, meta_y, meta_text, fonts.meta, MUTED_LIGHT)
-
-    y = y + badge_size + 12
+    y += 42
 
     # 插件简介
     if section.description:
@@ -1313,9 +1728,11 @@ def _replay_ops(draw, x0: int, y0: int, ops: list[tuple]) -> None:
             draw.text((x0 + x, y0 + y), value, font=font, fill=fill, anchor=anchor)
 
 
-def _draw_card_shell(img, draw, x: int, y: int, w: int, h: int, accent: str) -> None:
+def _draw_card_shell(draw, x: int, y: int, w: int, h: int, accent: str) -> None:
     draw.rounded_rectangle(
-        [x + 1, y + 3, x + w + 2, y + h + 4], radius=CARD_RADIUS, fill="#dbe3ec"
+        [x + 1, y + 3, x + w + 2, y + h + 4],
+        radius=CARD_RADIUS,
+        fill=(120, 140, 165, 70),
     )
     draw.rounded_rectangle(
         [x, y, x + w, y + h], radius=CARD_RADIUS, fill=accent
@@ -1323,55 +1740,64 @@ def _draw_card_shell(img, draw, x: int, y: int, w: int, h: int, accent: str) -> 
     draw.rounded_rectangle(
         [x + 2, y + CARD_PAD - 8, x + w - 2, y + h - 2],
         radius=CARD_RADIUS - 3,
-        fill=CARD_BG,
+        fill=(255, 255, 255, CARD_ALPHA),
     )
 
 
-def _draw_header(draw, opts: RenderOptions, fonts: _FontSet) -> None:
-    top = _hex_to_rgb(HEADER_TOP)
-    bottom = _hex_to_rgb(HEADER_BOTTOM)
-    for row in range(HEADER_H):
-        ratio = row / max(1, HEADER_H - 1)
-        color = tuple(round(top[i] + (bottom[i] - top[i]) * ratio) for i in range(3))
-        draw.line([(0, row), (CANVAS_W, row)], fill=color)
+def _background_source() -> Path | None:
+    """返回插件目录里的底图路径；不存在时返回 None。"""
 
-    # 右上角装饰
-    draw.ellipse([CANVAS_W - 320, -150, CANVAS_W + 80, 250], fill=_mix(HEADER_BOTTOM, "#ffffff", 0.10))
-    draw.ellipse([CANVAS_W - 210, -110, CANVAS_W + 40, 140], fill=_mix(HEADER_BOTTOM, "#ffffff", 0.08))
-
-    draw.text((MARGIN_X, 34), opts.title, font=fonts.title, fill="#ffffff")
-
-    right_x = CANVAS_W - MARGIN_X
-    if opts.astrbot_version:
-        draw.text(
-            (right_x, 32),
-            f"AstrBot {opts.astrbot_version}",
-            font=fonts.meta,
-            fill="#dbeafe",
-            anchor="ra",
-        )
-    stats = f"{opts.plugin_count} 个插件 · {opts.command_count} 条指令"
-    draw.text((right_x, 60), stats, font=fonts.meta, fill="#ffffff", anchor="ra")
-    if opts.generated_at:
-        draw.text(
-            (right_x, 88),
-            f"生成于 {opts.generated_at}",
-            font=fonts.tiny,
-            fill="#dbeafe",
-            anchor="ra",
-        )
+    path = Path(__file__).resolve().parent / BACKGROUND_IMAGE_NAME
+    return path if path.is_file() else None
 
 
-def _draw_legend(draw, opts: RenderOptions, fonts: _FontSet) -> None:
+def _make_background(width: int, height: int) -> Image.Image:
+    """按原画布尺寸铺满底图（等比缩放后居中裁剪）。"""
+
+    canvas = Image.new("RGB", (width, height), BG)
+    path = _background_source()
+    if path is None:
+        return canvas
+    try:
+        with Image.open(path) as source:
+            source = source.convert("RGB")
+            scale = max(width / source.width, height / source.height)
+            new_w = max(width, int(round(source.width * scale)))
+            new_h = max(height, int(round(source.height * scale)))
+            resample = getattr(Image, "Resampling", Image).LANCZOS
+            resized = source.resize((new_w, new_h), resample)
+            left = (new_w - width) // 2
+            top = int((new_h - height) * BACKGROUND_ANCHOR_Y)
+            return resized.crop((left, top, left + width, top + height))
+    except Exception as exc:  # pragma: no cover - 图片损坏等异常
+        logger.warning(f"{LOG_PREFIX} 底图加载失败，改用纯色背景：{exc}")
+        return canvas
+
+
+def _draw_header(draw, opts: RenderOptions, fonts: _FontSet, on_image: bool = False) -> None:
+    draw.text(
+        (MARGIN_X, 34),
+        opts.title,
+        font=fonts.title,
+        fill="#ffffff" if on_image else INK,
+    )
+
+
+def _draw_legend_background(draw) -> None:
     x1 = MARGIN_X
     x2 = CANVAS_W - MARGIN_X
     draw.rounded_rectangle(
         [x1, LEGEND_Y, x2, LEGEND_Y + LEGEND_H],
         radius=14,
-        fill="#ffffff",
+        fill=(255, 255, 255, CARD_ALPHA),
         outline="#dbe6f2",
         width=1,
     )
+
+
+def _draw_legend_text(draw, opts: RenderOptions, fonts: _FontSet) -> None:
+    x1 = MARGIN_X
+    x2 = CANVAS_W - MARGIN_X
     prefix = opts.command_prefix or "/"
     legend = (
         f"「{prefix}」为当前唤醒前缀 · 深色胶囊就是可以直接发送的指令 · "
@@ -1386,20 +1812,21 @@ def _draw_legend(draw, opts: RenderOptions, fonts: _FontSet) -> None:
     )
 
 
-def _draw_footer(draw, opts: RenderOptions, fonts: _FontSet, total_h: int) -> None:
-    note = opts.footer_note.strip() if opts.footer_note else ""
-    footer = (
-        f"共 {opts.plugin_count} 个插件 · {opts.command_count} 条指令 · "
-        f"生成于 {opts.generated_at}"
-    )
-    if note:
-        footer += " · " + note
-    footer += " · 由「指令大全」插件自动生成"
+def _footer_text(opts: RenderOptions) -> str:
+    return f"共 {opts.plugin_count} 个插件 · {opts.command_count} 条指令"
+
+
+_FOOTER_MAX_W = CANVAS_W - MARGIN_X * 2 - 44
+
+
+def _draw_footer_text(
+    draw, opts: RenderOptions, fonts: _FontSet, total_h: int
+) -> None:
     draw.text(
         (CANVAS_W // 2, total_h - MARGIN_X - 10),
-        _ellipsize(footer, fonts.footer, CANVAS_W - MARGIN_X * 2),
-        font=fonts.footer,
-        fill=MUTED_LIGHT,
+        _ellipsize(_footer_text(opts), fonts.desc, _FOOTER_MAX_W),
+        font=fonts.desc,
+        fill=MUTED,
         anchor="mm",
     )
 
@@ -1446,21 +1873,35 @@ def render_command_image(
     content_h = max(heights) if heights else 0
     total_h = CARDS_TOP + content_h + FOOTER_H + MARGIN_X
 
-    img = Image.new("RGB", (CANVAS_W, total_h), BG)
+    on_image = _background_source() is not None
+
+    # 先在半透明图层上画卡片 / 图例，再与底图合成，
+    # 这样背景只透出 20%，文字和指令胶囊仍然是清晰的。
+    base = _make_background(CANVAS_W, total_h).convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    _draw_legend_background(overlay_draw)
+    for col_index in range(columns):
+        x = MARGIN_X + col_index * (col_w + COL_GAP)
+        y = CARDS_TOP
+        for _section, accent, canvas, card_h in placements[col_index]:
+            _draw_card_shell(overlay_draw, x, y, col_w, card_h, accent)
+            y += card_h + CARD_GAP_Y
+
+    img = Image.alpha_composite(base, overlay).convert("RGB")
     draw = ImageDraw.Draw(img)
-    _draw_header(draw, options, fonts)
-    _draw_legend(draw, options, fonts)
+    _draw_header(draw, options, fonts, on_image=on_image)
+    _draw_legend_text(draw, options, fonts)
 
     for col_index in range(columns):
         x = MARGIN_X + col_index * (col_w + COL_GAP)
         y = CARDS_TOP
         for _section, accent, canvas, card_h in placements[col_index]:
-            _draw_card_shell(img, draw, x, y, col_w, card_h, accent)
             _replay_ops(draw, x, y, canvas.back_ops)
             _replay_ops(draw, x, y, canvas.ops)
             y += card_h + CARD_GAP_Y
 
-    _draw_footer(draw, options, fonts, total_h)
+    _draw_footer_text(draw, options, fonts, total_h)
 
     if output_path is None:
         output_path = _temp_image_path()
@@ -1481,22 +1922,31 @@ def _temp_image_path() -> Path:
     except Exception:
         import tempfile
 
-        base = Path(tempfile.gettempdir()) / "astrbot_command_help"
+        base = Path(tempfile.gettempdir()) / "astrbot_atri_command_help"
     base.mkdir(parents=True, exist_ok=True)
-    return base / f"command_help_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+    return base / f"{TEMP_FILE_PREFIX}_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
 
 
-def cleanup_old_images(retention_seconds: int = IMAGE_RETENTION_SECONDS) -> int:
-    """清掉过期的旧图，返回删除数量。"""
+def cleanup_old_images(
+    retention_seconds: int = IMAGE_RETENTION_SECONDS,
+    keep: set[str] | None = None,
+) -> int:
+    """清掉过期的旧图，返回删除数量。
+
+    ``keep`` 里的文件是当前缓存正在引用的图片，即使超过保留时间也不会删除。
+    """
 
     try:
         base = _temp_image_path().parent
     except Exception:
         return 0
+    keep = keep or set()
     removed = 0
     now = time.time()
     try:
-        for path in base.glob("command_help_*.png"):
+        for path in base.glob(f"{TEMP_FILE_PREFIX}_*.png"):
+            if str(path) in keep:
+                continue
             try:
                 if now - path.stat().st_mtime > retention_seconds:
                     path.unlink()
@@ -1513,15 +1963,30 @@ def cleanup_old_images(retention_seconds: int = IMAGE_RETENTION_SECONDS) -> int:
 # ---------------------------------------------------------------------------
 
 
+def event_is_admin(event: AstrMessageEvent) -> bool:
+    """判断消息发送者是否为 AstrBot 管理员。
+
+    优先用官方 ``event.is_admin()``；旧版本或测试用例里没有该方法时，
+    回退读取 ``event.role``。
+    """
+
+    checker = getattr(event, "is_admin", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            pass
+    return str(getattr(event, "role", "") or "").strip().lower() == "admin"
+
+
 class CommandHelpPlugin(Star):
     """只提供一个指令：把所有插件的指令汇总成一张图。"""
 
     def __init__(self, context: Context, config: Any = None) -> None:
         super().__init__(context)
         self._config = config
-        self._cache_path: str | None = None
-        self._cache_at: float = 0.0
-        self._cache_key: str = ""
+        # 按「实际渲染内容」的指纹缓存图片；内容不变时复用上一张图。
+        self._cache: dict[str, str] = {}
         logger.info(f"{LOG_PREFIX} 插件 v{PLUGIN_VERSION} 已加载")
 
     # -- 配置 ------------------------------------------------------------
@@ -1574,53 +2039,35 @@ class CommandHelpPlugin(Star):
                     return prefix.strip()[0]
         return "/"
 
-    def _astrbot_version(self) -> str:
-        try:
-            from astrbot.core.config.default import VERSION
-
-            return str(VERSION)
-        except Exception:
-            try:
-                from astrbot.core.config.default import VERSION as V  # type: ignore
-
-                return str(V)
-            except Exception:
-                return ""
-
     # -- 指令 -------------------------------------------------------------
 
     @filter.command(*COMMAND_NAMES, alias=list(COMMAND_ALIASES))
     async def cmd_command_help(self, event: AstrMessageEvent):
         """汇总所有插件的指令并渲染成一张图片。"""
         try:
+            is_admin = event_is_admin(event)
             include_builtin = self._bool_opt("include_builtin")
-            include_admin = self._bool_opt("include_admin_only")
+            # 非管理员永远看不到仅管理员 / 群管可用的指令；
+            # 管理员看到的完整度仍由 include_admin_only 控制。
+            include_admin = self._bool_opt("include_admin_only") and is_admin
             columns = self._int_opt("columns", 1, 3)
             show_aliases = self._bool_opt("show_aliases")
-            cache_seconds = self._int_opt("cache_seconds", 0, 3600)
             title = str(self._opt("title") or DEFAULT_OPTIONS["title"])
-            footer_note = str(self._opt("footer_note") or "")
-
-            cache_key = f"{include_builtin}|{include_admin}|{columns}|{show_aliases}|{title}|{footer_note}"
-            if (
-                cache_seconds > 0
-                and self._cache_path
-                and self._cache_key == cache_key
-                and time.monotonic() - self._cache_at <= cache_seconds
-                and Path(self._cache_path).is_file()
-            ):
-                yield event.image_result(self._cache_path)
-                return
+            exclude_rules = parse_exclude_rules(self._opt("exclude_rules"))
+            prefix = self._command_prefix(event)
 
             sections = await collect_command_sections(
                 include_builtin=include_builtin,
                 include_admin_only=include_admin,
+                exclude_rules=exclude_rules,
             )
             if not sections:
-                yield event.plain_result("暂时没有采集到任何已加载插件的指令。")
+                yield event.plain_result(
+                    "暂时没有可展示的指令（已排除「ATRI指令大全」自身，"
+                    "并按当前身份、内置指令开关与隐藏规则过滤）。"
+                )
                 return
 
-            prefix = self._command_prefix(event)
             if not PIL_AVAILABLE:
                 logger.warning(f"{LOG_PREFIX} Pillow 不可用，降级为文本输出")
                 text = sections_to_text(sections, prefix)
@@ -1632,35 +2079,50 @@ class CommandHelpPlugin(Star):
                 columns=columns,
                 show_aliases=show_aliases,
                 command_prefix=prefix,
-                footer_note=footer_note,
-                generated_at=time.strftime("%Y-%m-%d %H:%M"),
                 plugin_count=len(sections),
                 command_count=sum(section.command_count for section in sections),
-                astrbot_version=self._astrbot_version(),
             )
+
+            # 缓存按「实际要渲染的内容」判断：插件、指令、标题、栏数、
+            # 别名开关、唤醒前缀等都没有变化时，直接复用上一张图。
+            cache_key = render_fingerprint(sections, options)
+            cached_path = self._cache.get(cache_key)
+            if cached_path and Path(cached_path).is_file():
+                # 命中后移到队尾，便于按最近使用顺序淘汰。
+                self._cache.pop(cache_key)
+                self._cache[cache_key] = cached_path
+                yield event.image_result(cached_path)
+                return
+
             image_path = await asyncio.to_thread(
                 render_command_image, sections, options
             )
 
-            self._cache_path = str(image_path)
-            self._cache_at = time.monotonic()
-            self._cache_key = cache_key
+            self._cache[cache_key] = str(image_path)
+            while len(self._cache) > 8:
+                old_key, old_path = next(iter(self._cache.items()))
+                self._cache.pop(old_key, None)
+                try:
+                    Path(old_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
             try:
-                cleanup_old_images()
+                cleanup_old_images(keep=set(self._cache.values()))
             except Exception:
                 pass
 
             yield event.image_result(str(image_path))
         except Exception as exc:  # pragma: no cover - 兜底防炸
-            logger.exception(f"{LOG_PREFIX} 生成指令总览失败：{exc}")
-            yield event.plain_result(f"生成指令总览图片失败：{exc}")
+            logger.exception(f"{LOG_PREFIX} 生成 ATRI 指令大全图片失败：{exc}")
+            yield event.plain_result(f"生成 ATRI 指令大全图片失败：{exc}")
 
     async def terminate(self) -> None:
         """插件卸载时清理缓存文件。"""
 
-        if self._cache_path:
+        for path in self._cache.values():
             try:
-                Path(self._cache_path).unlink(missing_ok=True)
+                Path(path).unlink(missing_ok=True)
             except OSError:
                 pass
+        self._cache.clear()
         logger.info(f"{LOG_PREFIX} 插件已卸载")

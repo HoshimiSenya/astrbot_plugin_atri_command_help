@@ -3,7 +3,7 @@
     "description": "图片标题",
     "type": "string",
     "hint": "显示在图片顶部的大标题",
-    "default": "指令总览"
+    "default": "ATRI指令大全"
   },
   "include_builtin": {
     "description": "包含 AstrBot 内置指令",
@@ -12,9 +12,9 @@
     "default": true
   },
   "include_admin_only": {
-    "description": "包含仅管理员可用的指令",
+    "description": "管理员查看时包含仅管理员可用的指令",
     "type": "bool",
-    "hint": "关闭后，图片里只会出现所有人可用的指令（权限指令仍带角标）",
+    "hint": "普通用户无论如何都不会看到仅管理员 / 群管可用的指令；此开关只决定管理员自己查看时是否显示",
     "default": true
   },
   "show_aliases": {
@@ -28,16 +28,31 @@
     "hint": "1 为单列长图，2 为左右两栏，3 为三栏紧凑版",
     "default": 2
   },
-  "cache_seconds": {
-    "description": "图片缓存秒数",
-    "type": "int",
-    "hint": "同一时间内的重复请求直接复用上张图，避免刷屏时反复渲染；填 0 表示每次都重新生成",
-    "default": 30
-  },
-  "footer_note": {
-    "description": "页脚附加说明",
-    "type": "string",
-    "hint": "可留空；例如填写「有问题找群主」",
-    "default": ""
+  "exclude_rules": {
+    "description": "隐藏指定插件的指令",
+    "type": "template_list",
+    "hint": "在这里添加规则：先填插件（显示名或目录名，支持 * 通配），再填要隐藏的指令（多个用逗号分隔）。指令留空或填 * 表示隐藏该插件的全部指令。",
+    "default": [],
+    "templates": {
+      "rule": {
+        "name": "隐藏规则",
+        "hint": "一条规则 = 一个插件 + 要隐藏的指令",
+        "display_item": "plugin",
+        "items": {
+          "plugin": {
+            "description": "插件",
+            "type": "string",
+            "hint": "插件显示名或目录名，例如「ATRI指令大全」或「astrbot_plugin_atri_command_help」；* 表示所有插件",
+            "default": ""
+          },
+          "commands": {
+            "description": "要隐藏的指令",
+            "type": "string",
+            "hint": "多个用逗号分隔，例如「reset, stats」；留空或 * 表示隐藏该插件的全部指令",
+            "default": ""
+          }
+        }
+      }
+    }
   }
 }

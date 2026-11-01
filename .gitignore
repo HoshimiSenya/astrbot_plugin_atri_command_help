@@ -6,6 +6,7 @@ __pycache__/
 venv/
 
 # 本机开发产物
+_preview_atri_command_help.png
 _preview_command_help.png
 _preview*.png
 tests/_preview*.png
