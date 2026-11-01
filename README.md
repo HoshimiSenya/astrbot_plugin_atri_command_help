@@ -1,10 +1,14 @@
+<div align="center">
+
 <img src="https://raw.githubusercontent.com/HoshimiSenya/astrbot_plugin_atri_command_help/main/logo.png" alt="插件图标" width="120">
 
-# ATRI指令大全 · astrbot_plugin_atri_command_help
+# ATRI指令大全
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://github.com/HoshimiSenya/astrbot_plugin_atri_command_help/blob/main/LICENSE)
-![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.16-blue)
-![Version](https://img.shields.io/badge/version-1.2.0-2f7fd1)
+[![AstrBot](https://img.shields.io/badge/AstrBot-%E2%89%A54.5-5865f2?style=flat-square)](https://github.com/AstrBotDevs/AstrBot)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)](LICENSE)
+
+</div>
 
 给 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 加一个**统一的指令查询入口**：只注册一个指令，发送后自动抓取当前所有已加载插件的指令，在**本机渲染成一张卡片图**发出来。不依赖远端 T2I 服务，离线也能出图。
 
