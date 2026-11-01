@@ -1,10 +1,5 @@
 # 更新日志
 
-本项目所有重要的变更都将记录在此文件中。
-
-本格式基于 [保持更新日志](https://keepachangelog.com/zh-CN/1.1.0/)（Keep a Changelog），
-且本项目遵循 [语义化版本规范](https://semver.org/lang/zh-CN)（Semantic Versioning）。
-
 ## 1.2.0 - 2026-11-01
 
 ### 变更
