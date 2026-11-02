@@ -149,6 +149,12 @@ astrbot_plugin_atri_command_help/
 
 渲染核心只依赖 Pillow；也可以在自己的 Python 环境中导入 `main.py` 的 `render_command_image()`，传入构造好的 `PluginSection` 列表做离线出图检查。
 
+## 常见问题
+
+- **发两次图不一样？** 只要插件、指令、标题、栏数、别名开关、唤醒前缀和隐藏规则都没变，第二张会直接复用上一张图，不会重新渲染。改了这些内容中的任意一项才会重新出图。
+- **普通用户看不到管理员指令？** 这是预期行为。插件会先鉴权再出图，普通用户只会看到自己有权使用的指令，确认权限配置是否符合预期即可。
+- **底图不见了？** 检查插件目录下的 `ATRI.jpeg` 是否还在；文件缺失时会自动退回纯色背景，不影响出图。
+
 ## 上游与许可
 
 - 上游项目：[AcceleratorYue/astrbot_plugin_command_help](https://github.com/AcceleratorYue/astrbot_plugin_command_help)
